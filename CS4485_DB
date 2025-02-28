@@ -1,0 +1,90 @@
+import os
+import streamlit as st
+import pymongo
+import json
+from langchain_core.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chat_models import ChatOpenAI
+
+# Set up MongoDB
+try:
+    mongo_URI = os.getenv("MONGO_URI")
+    client = pymongo.MongoClient(mongo_URI)
+    db = client["restaurant"]
+    print("DEBUG: Successfully connected to MongoDB.")
+    print("DEBUG: Collections available:", db.list_collection_names())
+except Exception as e:
+    print("ERROR: Failed to connect to MongoDB!", e)
+
+menu_collection = db["menu"]
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+# Initialize LangChain LLM
+llm = ChatOpenAI(temperature=0, openai_api_key=openai_api_key,)
+
+# Prompt template for LangChain
+template =(
+    "Extract the food items, quantities, and customizations from this order: '{order_text}'. "
+    "Return the result as JSON with 'name', 'quantity', and 'customizations' fields for each item."
+)
+
+# Streamlit UI
+st.title("Restaurant Order AI with MongoDB Menu")
+st.write("Type your order below, and the AI will validate it against the restaurant menu.")
+
+prompt = PromptTemplate(input_variables=["order_text"], template=template, response_format="json")
+llm_chain = LLMChain(llm=llm, prompt=prompt)
+
+order_text = st.text_area("Enter your order:", placeholder="Example: I want 2 Double-Doubles and 1 Fries")
+
+if st.button("Analyze Order"):
+    if order_text.strip():
+        with st.spinner("Analyzing your order..."):
+            try:
+
+                result = llm_chain.run(order_text)
+
+                try:
+                    order_json = json.loads(result)
+
+                    print("DEBUG: Parsed JSON:", order_json)
+                    st.json(order_json)
+
+                    if "items" not in order_json:
+                        raise KeyError('Missing key: "items" in OpenAI response')
+
+                    total=0
+
+                    validated_order = []
+                    for item in order_json["items"]:
+                        menu_item = menu_collection.find_one({"name": item["name"]})
+                        if menu_item:
+                            validated_order.append({
+                                "name": item["name"],
+                                "quantity": item["quantity"],
+                                "price": menu_item["price"],
+                                "total": item["quantity"] * menu_item["price"]
+                            })
+
+                    if validated_order:
+                        st.subheader("Final Order (Validated)")
+                        st.json(validated_order)
+                    else:
+                        st.error("Your order contains only unavailable items.")
+
+                except json.JSONDecodeError as e:
+                    st.error(f"JSON Parsing Error: {e}")
+                    print("DEBUG: JSON Parsing Error:", e)
+
+                except KeyError as e:
+                    st.error(f"Key Error: {e}")
+                    print("DEBUG: Key Error:", e)
+
+            except Exception as e:
+                st.error(f"General Error: {e}")
+                print("DEBUG: General Error:", e)
+    else:
+        st.warning("Please enter your order before clicking 'Analyze Order'.")
